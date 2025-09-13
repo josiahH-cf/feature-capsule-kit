@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:{{PROJECT_NAMESPACE}}:schema:capsule:{{FEATURE_ID}}:acceptance.output_contract:v1@{{VERSION}}",
+  "title": "Output Contract for {{FEATURE_ID}}",
+  "description": "Schema for outputs produced by {{FEATURE_ID}} capsule.",
+  "type": "object",
+  "version": "{{VERSION}}",
+  "properties": {},
+  "required": []
+}
+
