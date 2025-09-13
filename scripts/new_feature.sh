@@ -62,11 +62,13 @@ parse_toml_key() {
     $0 ~ /^\s*\[[^\]]+\]\s*$/ {insec=($0==sec); next}
     insec==1 {
       # match key = "value"
-      if ($0 ~ "^\\s*" key "\\s*=\\s*") {
-        sub(/^[^=]*=\s*/, "");
-        gsub(/^[\"]|[\"]\s*$/, "");
-        gsub(/\r/, "");
-        print; exit
+      if ($0 ~ ("^\\s*" key "\\s*=\\s*")) {
+        val=$0
+        sub(/^[^=]*=\s*/, "", val)
+        gsub(/^"|"\s*$/, "", val)
+        gsub(/^[ \t]+|[ \t]+$/, "", val)
+        gsub(/\r/, "", val)
+        print val; exit
       }
     }
   ' "$CONFIG"
@@ -163,4 +165,3 @@ else
 fi
 
 exit 0
-
