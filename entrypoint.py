@@ -105,6 +105,94 @@ def _run_validate(feature_id: str, doc: str = None, require_implementable: bool 
     return proc.returncode
 
 
+def _gated_copy_and_validate(
+    tmp_src: Path,
+    feature_id: str,
+    dest_capsule: Path,
+    dest_features: Path,
+    force: bool = False,
+    require_implementable: bool = False,
+) -> int:
+    """
+    Copy into place with rollback on validation failure.
+
+    Strategy:
+    - Prepare new content under sibling ".__new" dirs
+    - If existing, move current to ".__old" and swap in new
+    - Run validators; on failure, rollback and return nonzero
+    - On success, remove "__old" backups
+    """
+    cap_src = tmp_src / "capsule" / feature_id
+    feat_src = tmp_src / "features" / feature_id
+
+    # Prepare new dirs
+    cap_new = dest_capsule.with_name(dest_capsule.name + ".__new")
+    feat_new = dest_features.with_name(dest_features.name + ".__new")
+    for d in (cap_new, feat_new):
+        if d.exists():
+            shutil.rmtree(d)
+
+    if cap_src.exists():
+        cap_new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(cap_src, cap_new)
+    if feat_src.exists():
+        feat_new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(feat_src, feat_new)
+
+    # Compute backups if needed
+    cap_old = dest_capsule.with_name(dest_capsule.name + ".__old")
+    feat_old = dest_features.with_name(dest_features.name + ".__old")
+    for d in (cap_old, feat_old):
+        if d.exists():
+            shutil.rmtree(d)
+
+    # If destinations exist
+    if dest_capsule.exists() or dest_features.exists():
+        if not force:
+            print("ERROR: destination exists; use --force to overwrite", file=sys.stderr)
+            # Cleanup staged new dirs
+            for d in (cap_new, feat_new):
+                if d.exists():
+                    shutil.rmtree(d)
+            return 2
+        # Move current to __old and put __new in place
+        if dest_capsule.exists():
+            dest_capsule.rename(cap_old)
+        if cap_new.exists():
+            cap_new.rename(dest_capsule)
+        if dest_features.exists():
+            dest_features.rename(feat_old)
+        if feat_new.exists():
+            feat_new.rename(dest_features)
+    else:
+        # No existing; just move __new into place
+        if cap_new.exists():
+            cap_new.rename(dest_capsule)
+        if feat_new.exists():
+            feat_new.rename(dest_features)
+
+    # Validate
+    rc = _run_validate(feature_id, None, require_implementable)
+    print("Validation:", "PASS" if rc == 0 else f"FAIL (exit {rc})")
+    if rc != 0:
+        # Rollback: remove new and restore old if present
+        if dest_capsule.exists():
+            shutil.rmtree(dest_capsule)
+        if cap_old.exists():
+            cap_old.rename(dest_capsule)
+        if dest_features.exists():
+            shutil.rmtree(dest_features)
+        if feat_old.exists():
+            feat_old.rename(dest_features)
+        return rc
+
+    # Success: remove backups
+    for d in (cap_old, feat_old):
+        if d.exists():
+            shutil.rmtree(d)
+    return 0
+
+
 def cmd_new(args):
     engine_root = _engine_root()
     app_root = _app_root()
@@ -132,32 +220,10 @@ def cmd_new(args):
         print("DRY-RUN: would render, validate, and copy to destinations")
         return 0
 
-    if (dest_capsule.exists() or dest_features.exists()) and not args.force:
-        print("ERROR: destination exists; use --force to overwrite", file=sys.stderr)
-        return 2
-
     tmp_src = _render_template(template_dir, args.feature_id, cfg["project"]["namespace"], version, updated)
 
-    # Overwrite destinations if forced
-    if args.force:
-        if dest_capsule.exists():
-            shutil.rmtree(dest_capsule)
-        if dest_features.exists():
-            shutil.rmtree(dest_features)
-
-    # Copy subtrees
-    cap_src = tmp_src / "capsule" / args.feature_id
-    if cap_src.exists():
-        dest_capsule.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(cap_src, dest_capsule)
-    feat_src = tmp_src / "features" / args.feature_id
-    if feat_src.exists():
-        dest_features.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(feat_src, dest_features)
-
-    # Validate
-    rc = _run_validate(args.feature_id, None, False)
-    print("Validation:", "PASS" if rc == 0 else f"FAIL (exit {rc})")
+    # Copy with validation gate and rollback
+    rc = _gated_copy_and_validate(tmp_src, args.feature_id, dest_capsule, dest_features, force=args.force, require_implementable=False)
     return rc
 
 
@@ -229,7 +295,77 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_inf = sub.add_parser("info", help="print engine/app config and paths")
     p_inf.set_defaults(func=cmd_info)
+    
+    p_wiz = sub.add_parser("wizard", help="interactive Q&A to create a feature")
+    p_wiz.set_defaults(func=cmd_wizard)
     return p
+
+
+def _prompt(prompt: str, default: str = None, validate=None) -> str:
+    while True:
+        if default:
+            val = input(f"{prompt} [{default}]: ").strip()
+            val = val if val else default
+        else:
+            val = input(f"{prompt}: ").strip()
+        if validate and not validate(val):
+            print("Invalid value; please try again.")
+            continue
+        return val
+
+
+def _is_kebab_case(s: str) -> bool:
+    return bool(re.match(r"^[a-z0-9]+(?:-[a-z0-9]+)*$", s))
+
+
+def cmd_wizard(_args) -> int:
+    engine_root = _engine_root()
+    app_root = _app_root()
+    cfg = _load_config(app_root)
+
+    print("== Feature Wizard ==")
+    fid = _prompt("Feature ID (kebab-case)", validate=_is_kebab_case)
+    ns_default = cfg["project"].get("namespace", "")
+    ns = _prompt("Namespace", default=ns_default)
+    ver = _prompt("Version", default="0.1.0")
+    today = _dt.date.today().isoformat()
+    upd = _prompt("Updated date (YYYY-MM-DD)", default=today)
+    tmpl_default = "templates/feature-capsule/feature-template"
+    tmpl = _prompt("Template path (relative to engine root)", default=tmpl_default)
+
+    template_dir = (engine_root / tmpl).resolve()
+    if not template_dir.is_dir():
+        print(f"ERROR: template not found: {template_dir}", file=sys.stderr)
+        return 2
+
+    dest_capsule = (app_root / cfg["paths"]["capsule"] / fid).resolve()
+    dest_features = (app_root / cfg["paths"]["features"] / fid).resolve()
+
+    print("\n== Summary ==")
+    print(f"Feature ID: {fid}")
+    print(f"Namespace:  {ns}")
+    print(f"Version:    {ver}")
+    print(f"Updated:    {upd}")
+    print(f"Template:   {template_dir}")
+    print("Destinations:")
+    print(f"  capsule:  {dest_capsule}")
+    print(f"  features: {dest_features}")
+
+    dry = _prompt("Dry-run? (yes/no)", default="no", validate=lambda x: x.lower() in {"yes", "no"}).lower() == "yes"
+    force = _prompt("Force overwrite if exists? (yes/no)", default="no", validate=lambda x: x.lower() in {"yes", "no"}).lower() == "yes"
+
+    proceed = _prompt("Proceed? (yes/no)", default="yes", validate=lambda x: x.lower() in {"yes", "no"}).lower() == "yes"
+    if not proceed:
+        print("Aborted.")
+        return 1
+
+    if dry:
+        print("DRY-RUN: would render, validate, and copy to destinations")
+        return 0
+
+    tmp_src = _render_template(template_dir, fid, ns, ver, upd)
+    rc = _gated_copy_and_validate(tmp_src, fid, dest_capsule, dest_features, force=force, require_implementable=False)
+    return rc
 
 
 def main(argv=None) -> int:
@@ -240,4 +376,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
