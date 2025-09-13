@@ -52,7 +52,9 @@ def main():
             eprint(f"ERROR: template present but not in registry: {rel}")
         issues += len(unregistered)
 
-    extra = values - present
+    # Allowlisted non-template references (special prompts not acting as doc templates)
+    allow_extra = {"prompts/final_bundle_verifier.md"}
+    extra = {rel for rel in values - present if rel not in allow_extra}
     if extra:
         for rel in sorted(extra):
             eprint(f"ERROR: registry references non-template file: {rel}")
@@ -65,4 +67,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

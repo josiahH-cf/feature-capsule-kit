@@ -38,7 +38,7 @@ def main() -> int:
         (root / 'schemas'),
         (root / 'capsule' / 'reports' / 'validation'),
     }
-    allow_files = {root / 'README.md'}
+    allow_files = {root / 'README.md', root / 'scripts' / 'check_generic.py'}
     pattern = re.compile(r'\bautomatr\b', re.I)
     for dirpath, _, filenames in os.walk(root):
         d = Path(dirpath)
@@ -69,4 +69,3 @@ def main() -> int:
 
 if __name__ == '__main__':
     sys.exit(main())
-
